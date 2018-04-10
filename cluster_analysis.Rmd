@@ -1,0 +1,266 @@
+---
+title: "Customer_Segmentations"
+author: "Vivek Singh"
+date: "March 19, 2018"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+```{r}
+
+memory.limit(size=54000)
+
+library(data.table)
+library(dplyr)
+library(tidyverse)
+library(lubridate)
+library(feather)
+library(zoo)
+library(cluster)
+library(factoextra)
+library(NbClust)
+library(gridExtra)
+
+#V4 <-  fread("~\\V23.csv")
+  
+###subsetting Q1 data
+
+V1 <- select(V4, contains("Q1")
+V2 <- select(X, contains("Q1"))
+  
+```
+
+Using only numeric variables & K-means clustering
+
+```{r K-means Clustering}
+gc()
+set.seed(23)
+
+# using different cluster values from 2 to 5 for aggregate data
+
+k2 <- kmeans(V1, centers = 2, nstart = 25)
+k3 <- kmeans(V1, centers = 3, nstart = 25)
+k4 <- kmeans(V1, centers = 4, nstart = 25)
+k5 <- kmeans(V1, centers = 5, nstart = 25)
+
+# plots to compare
+p1 <- fviz_cluster(k2, geom = "point", data = V1) + ggtitle("k = 2")
+p2 <- fviz_cluster(k3, geom = "point",  data = V1) + ggtitle("k = 3")
+p3 <- fviz_cluster(k4, geom = "point",  data = V1) + ggtitle("k = 4")
+p4 <- fviz_cluster(k5, geom = "point",  data = V1) + ggtitle("k = 5")
+
+library(gridExtra)
+grid.arrange(p1, p2, p3, p4, nrow = 2)
+
+gc()
+
+# comupte optimal number of clusters using Elbow method 
+wss <- function(k) {
+  kmeans(V1, k, nstart = 10 )$tot.withinss
+}
+
+# Compute and plot wss for k = 1 to k = 15
+k.values <- 1:15
+
+# extract wss for 2-15 clusters
+wss_values <- map_dbl(k.values, wss)
+
+plot(k.values, wss_values,
+       type="b", pch = 19, frame = FALSE, 
+       xlab="Number of clusters K",
+       ylab="Total within-clusters sum of squares")
+
+# compute optimal number of clusters using Gap statistics
+
+#set.seed(123)
+#gap_stat <- clusGap(V1, FUN = kmeans, nstart = 25,
+#                    K.max = 10, B = 50)
+
+
+###Based on the grid plot and the Elbow method, using number of clusters = 4
+
+final <- kmeans(V1, 4, nstart = 25)
+fviz_cluster(final, data=V1)
+
+```
+
+K-means is not giving distinct clusters. Next adding categorical data and using K-prototype clustering
+
+```{r Add Categorical Data}
+#Adding V13 data to Q1 data for additional categorical variables
+
+#V7 <- V1 %>% left_join(V13, by = c("V3"))
+
+# The number of records increased from X to X+K.. Checking for duplicate records
+
+#V13_duplicates <- V13[duplicated(V13$V3),] #K V3 are duplicates
+#V1_duplicates <- V1[duplicated(V1$V3),] #No V3 is duplicate
+
+#replacing duplicate V3 with unique value in V13 data
+
+#V13 <- V13[!duplicated(V13$V3),]
+
+#running the join code again without duplicate V3
+
+V7 <- V1 %>% left_join(V13, by = c("V3"))
+V7[is.na(V7)]<-0
+V7[is.null(V7)]<-0
+
+str(V7)
+
+# converting character variables to factors
+
+character_vars <- lapply(V7, class) == "character"
+V7[, character_vars] <- lapply(V7[, character_vars], as.factor)
+V7 <- as.data.frame(V7)
+
+rm(V13_duplicates,V1_duplicates)
+
+```
+K-prototype clustering using both numeric and categorical data
+
+```{r K-Prototype clustering}
+
+library(clustMixType)
+
+#K-Prototype clustering for Q1 after adding V13 data
+
+wss_kproto <- function(k)
+{
+  Tots <- c() #initializes variable to accept the results of the loop
+  for ( i in k)
+  {
+    Tots[i] <-  kproto(V7, k=i)$tot.withinss #runs clustering for each of the values of the value ranges passed 
+  }
+  Tots <- as.data.frame(Tots) #creates data frame of the results
+  return(Tots)#returns the result
+}
+
+k.values <- 1:10 #value range to pass to the "wss" function
+
+Within_Sum_Sq <-  wss_kproto(k.values) #calling the function, passing the values, and assigning it to object
+
+cluster_WTSS <- cbind(k.values, Within_Sum_Sq) #binding results from the function with the cluster values for plotting 
+
+#plot that shows cluster within sum of squares plotted with number of clusters
+cluster_WTSS %>%  ggplot()+
+  geom_line(aes(x=k.values, y=Tots))+
+  geom_point(aes(x=k.values, y=Tots))+
+  labs(x="Number of Clusters", y="Within Sum of Squares")
+
+#run cluster based on best number of clusters from elbow method
+clusterResults <- kproto(V7, k=5)
+V7$Cluster <- as.factor(clusterResults$cluster)
+
+fwrite(V7, file = "~\\V7.csv", row.names = FALSE)
+
+#show variable distribution grouped by clusters
+clprofiles(clusterResults, V7)
+
+distances <- as.data.frame(clusterResults$dists)
+clusters <- as.data.frame(clusterResults$cluster)
+distance_cluster <- cbind.data.frame(distances, clusters)
+
+#plots observations and colors them by cluster
+ggplot(data=distances, aes(x=distances$V1, y=distances$V2, color=clusterResults$cluster))+
+geom_point() + xlim(-250, 50000)+ ylim(0,50000)
+
+```
+Grouping based on price sensitivity
+
+```{r Price Sensitivity}
+
+V5 <- V7[,c("V3","V9", "Cluster")]
+
+
+#creating the groups from 1 to 6 based on percentage changes
+V5$V10 <- as.factor(case_when(V5$V9<=0 ~"0",
+                              V5$V9<5 ~ "1",
+                              V5$V9<10 ~"2",
+                              V5$V9<15 ~"3",
+                              V5$V9<20 ~"4",
+                               V5$V9>20 ~"5"))
+
+
+ V6 <- select(X, contains("Q2"))
+ V8 <- V5 %>% left_join(V6, by = c("V3"))
+ V8[is.na(V8)] <-0
+ 
+fwrite(V8, file = "~\\V8.csv", row.names = FALSE) 
+ 
+ trial1 <- V8 %>% group_by(Cluster,V10) %>% summarise(n=n()) 
+ trial2 <- V8 %>% filter(`V11`>0) %>% 
+            group_by(Cluster,V10) %>% summarise(x=n())
+
+ trial1 <- trial1 %>% left_join(trial2, by = c("Cluster","V10"))
+ 
+ trial1[is.na(trial1)] <- 0
+ trial1 <- trial1 %>% group_by(Cluster, V10) %>% mutate(V12 = (round(x/n,2)*100))
+ 
+ fwrite(trial1, file = "~\\trial1.csv", row.names = FALSE)
+ 
+```
+K-prototypes is givng better clusters.
+Validating the trend observed in the clusters using next quarter data
+
+```{r For next quarter}
+set.seed(123)
+
+V14 <- select(V4, contains("Q2"))
+
+V21 <- V14 %>% left_join(V13, by = c("V3"))
+V21[is.na(V21)]<-0
+
+str(V21)
+
+# converting character variables to factors
+character_vars <- lapply(V21, class) == "character"
+V21[, character_vars] <- lapply(V21[, character_vars], as.factor)
+V21 <- as.data.frame(V21)
+
+#Clustering
+Q2_clusterResults <- kproto(V21, k=5)
+V21$Cluster <- as.factor(clusterResults$cluster)
+
+#show variable distribution grouped by clusters
+clprofiles(clusterResults, V21)
+
+#creating percentage change groups
+
+V15 <- V21[,c("V3","V16", "Cluster")]
+
+V15$V10 <- as.factor(case_when(V15$`V16`<=0 ~"0",
+                                             V15$V16<5 ~ "1",
+                                             V15$V16<10 ~"2",
+                                             V15$V16<15 ~"3",
+                                             V15$V16<20 ~"4",
+                                             V15$V16>20 ~"5"))
+
+
+V17 <- select(cl, contains("Q3"))
+V18 <- V15 %>% left_join(V17, by = c("V3"))
+V18[is.na(V18)] <-0
+ 
+fwrite(V18, file = "~\\V18.csv", row.names = FALSE) 
+ 
+ V19 <- V18 %>% group_by(Cluster,V10) %>% summarise(n=n()) 
+ V20 <- V18 %>% filter(`V25`>0) %>% 
+            group_by(Cluster,V10) %>% summarise(x=n())
+
+ V19 <- V19 %>% left_join(V20, by = c("Cluster","V10"))
+ 
+ V19[is.na(V19)] <- 0
+ V19 <- V19 %>% group_by(Cluster, V10) %>% mutate(V12 = (round(x/n,2)*100))
+ 
+ fwrite(V19, file = "~\\V19.csv", row.names = FALSE)
+
+
+```
